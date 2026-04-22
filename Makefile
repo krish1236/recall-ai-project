@@ -1,4 +1,4 @@
-.PHONY: api web install infra.up infra.down infra.logs db.migrate
+.PHONY: api web install infra.up infra.down infra.logs db.migrate test
 
 install:
 	cd apps/api && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -21,3 +21,6 @@ infra.logs:
 
 db.migrate:
 	cd apps/api && .venv/bin/alembic upgrade head
+
+test:
+	cd apps/api && .venv/bin/pytest tests/ -v
