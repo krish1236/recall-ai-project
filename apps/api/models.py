@@ -20,7 +20,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import INET, JSONB, TSVECTOR, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db import Base
@@ -108,7 +108,7 @@ class MeetingEvent(Base):
 class WebhookDelivery(Base):
     __tablename__ = "webhook_deliveries"
     __table_args__ = (
-        Index("ix_webhook_deliveries_received_at", "received_at", postgresql_ops={"received_at": "DESC"}),
+        Index("ix_webhook_deliveries_received_at", "received_at"),
         Index("ix_webhook_deliveries_meeting_id", "meeting_id"),
     )
 
@@ -119,7 +119,7 @@ class WebhookDelivery(Base):
     event_type: Mapped[Optional[str]] = mapped_column(Text)
     headers_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     signature_valid: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    remote_addr: Mapped[Optional[str]] = mapped_column(INET)
+    remote_addr: Mapped[Optional[str]] = mapped_column(Text)
     response_code: Mapped[Optional[int]] = mapped_column(Integer)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     received_at: Mapped[datetime] = mapped_column(
