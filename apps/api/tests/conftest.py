@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -9,8 +10,25 @@ from sqlalchemy import text
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
+os.environ.setdefault("RECALL_WEBHOOK_SECRET", "test-webhook-secret-do-not-use-in-prod")
+
 from db import SessionLocal, engine  # noqa: E402
 from models import Base  # noqa: E402
+
+_TABLES = [
+    "insight_evidence",
+    "insights",
+    "action_items",
+    "summaries",
+    "transcript_utterances",
+    "utterance_spans",
+    "meeting_events",
+    "webhook_deliveries",
+    "dead_letter_jobs",
+    "llm_cache",
+    "meetings",
+    "accounts",
+]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -21,9 +39,14 @@ def _verify_tables_exist():
         )}
     missing = {t.name for t in Base.metadata.sorted_tables} - existing
     if missing:
-        raise RuntimeError(
-            f"missing tables {missing}; run `make db.migrate` first"
-        )
+        raise RuntimeError(f"missing tables {missing}; run `make db.migrate` first")
+
+
+@pytest.fixture(autouse=True)
+def _truncate():
+    with engine.begin() as conn:
+        conn.execute(text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"))
+    yield
 
 
 @pytest.fixture
