@@ -83,12 +83,24 @@ class Worker:
         kwargs: dict = {"count": self.read_count}
         if block_ms and block_ms > 0:
             kwargs["block"] = block_ms
-        result = await self.r.xreadgroup(
-            GROUP_NAME,
-            self.consumer_id,
-            {s: ">" for s in stream_names},
-            **kwargs,
-        )
+        try:
+            result = await self.r.xreadgroup(
+                GROUP_NAME,
+                self.consumer_id,
+                {s: ">" for s in stream_names},
+                **kwargs,
+            )
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "NOGROUP" not in msg:
+                raise
+            # stale entry in streams:active: the stream was dropped (e.g. test flushdb)
+            # but the bot_id lingered in the set. Drop the offenders and retry next poll.
+            for name, bot in zip(stream_names, streams):
+                if not await self.r.exists(name):
+                    log.info("pruning stale stream=%s from active set", name)
+                    await self.r.srem("streams:active", bot)
+            return 0
         if not result:
             return 0
 
