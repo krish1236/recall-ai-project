@@ -6,11 +6,12 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import desc, func, select
 
 from db import SessionLocal
-from models import Meeting
+from models import ActionItem, Insight, InsightEvidence, Meeting, Summary, TranscriptUtterance
 from recall_client import DEFAULT_REALTIME_EVENTS, RecallClient, RecallError
 
 log = logging.getLogger("meetings")
@@ -30,6 +31,69 @@ class CreateMeetingResponse(BaseModel):
     meeting_id: UUID
     recall_bot_id: Optional[str]
     status: str
+
+
+class InsightDTO(BaseModel):
+    id: UUID
+    type: str
+    title: str
+    description: Optional[str]
+    severity: Optional[str]
+    confidence: Optional[float]
+    created_at: datetime
+    evidence_utterance_ids: list[UUID]
+
+
+class UtteranceDTO(BaseModel):
+    id: UUID
+    speaker_label: Optional[str]
+    text: str
+    start_ms: Optional[int]
+    end_ms: Optional[int]
+    created_at: datetime
+
+
+class ActionItemDTO(BaseModel):
+    id: UUID
+    owner_name: Optional[str]
+    action_text: str
+    due_hint: Optional[str]
+    status: str
+
+
+class SummaryDTO(BaseModel):
+    id: UUID
+    summary_type: str
+    content_markdown: str
+
+
+class MeetingListItem(BaseModel):
+    id: UUID
+    title: Optional[str]
+    meeting_url: Optional[str]
+    status: str
+    started_at: Optional[datetime]
+    ended_at: Optional[datetime]
+    created_at: datetime
+    top_insight_title: Optional[str]
+    top_insight_type: Optional[str]
+    insight_count: int
+    has_high_severity: bool
+
+
+class MeetingDetail(BaseModel):
+    id: UUID
+    title: Optional[str]
+    meeting_url: Optional[str]
+    status: str
+    started_at: Optional[datetime]
+    ended_at: Optional[datetime]
+    recall_bot_id: Optional[str]
+    owner_name: Optional[str]
+    utterances: list[UtteranceDTO]
+    insights: list[InsightDTO]
+    action_items: list[ActionItemDTO]
+    summaries: list[SummaryDTO]
 
 
 def get_recall_client() -> RecallClient:
@@ -94,14 +158,104 @@ async def create_meeting(
     )
 
 
-@router.get("/meetings/{meeting_id}", response_model=CreateMeetingResponse)
-async def get_meeting(meeting_id: UUID) -> CreateMeetingResponse:
+@router.get("/meetings", response_model=list[MeetingListItem])
+async def list_meetings(
+    status: Optional[str] = Query(None, description="filter by exact status"),
+    limit: int = Query(50, ge=1, le=200),
+) -> list[MeetingListItem]:
+    with SessionLocal() as s:
+        stmt = select(Meeting).order_by(desc(Meeting.created_at)).limit(limit)
+        if status:
+            stmt = stmt.where(Meeting.status == status)
+        meetings = s.execute(stmt).scalars().all()
+
+        # one query per meeting for the top insight + count — good enough for 50 rows
+        out: list[MeetingListItem] = []
+        for m in meetings:
+            top = s.execute(
+                select(Insight)
+                .where(Insight.meeting_id == m.id)
+                .order_by(desc(Insight.confidence.is_(None)), desc(Insight.confidence))
+                .limit(1)
+            ).scalars().first()
+            count = s.execute(
+                select(func.count()).select_from(Insight).where(Insight.meeting_id == m.id)
+            ).scalar_one()
+            has_high = s.execute(
+                select(func.count()).select_from(Insight)
+                .where(Insight.meeting_id == m.id, Insight.severity == "high")
+            ).scalar_one() > 0
+            out.append(MeetingListItem(
+                id=m.id, title=m.title, meeting_url=m.meeting_url, status=m.status,
+                started_at=m.started_at, ended_at=m.ended_at, created_at=m.created_at,
+                top_insight_title=top.title if top else None,
+                top_insight_type=top.type if top else None,
+                insight_count=count, has_high_severity=has_high,
+            ))
+        return out
+
+
+@router.get("/meetings/{meeting_id}", response_model=MeetingDetail)
+async def get_meeting(meeting_id: UUID) -> MeetingDetail:
     with SessionLocal() as s:
         m = s.get(Meeting, meeting_id)
         if m is None:
             raise HTTPException(status_code=404, detail="meeting not found")
-        return CreateMeetingResponse(
-            meeting_id=m.id,
-            recall_bot_id=m.recall_bot_id,
-            status=m.status,
+
+        utts = s.execute(
+            select(TranscriptUtterance)
+            .where(TranscriptUtterance.meeting_id == meeting_id)
+            .order_by(TranscriptUtterance.start_ms, TranscriptUtterance.created_at)
+        ).scalars().all()
+
+        insights = s.execute(
+            select(Insight)
+            .where(Insight.meeting_id == meeting_id)
+            .order_by(Insight.created_at)
+        ).scalars().all()
+        insight_ids = [i.id for i in insights]
+        evidences = s.execute(
+            select(InsightEvidence).where(InsightEvidence.insight_id.in_(insight_ids))
+        ).scalars().all() if insight_ids else []
+        ev_by_insight: dict[UUID, list[UUID]] = {i.id: [] for i in insights}
+        for ev in evidences:
+            ev_by_insight.setdefault(ev.insight_id, []).append(ev.utterance_id)
+
+        actions = s.execute(
+            select(ActionItem).where(ActionItem.meeting_id == meeting_id)
+        ).scalars().all()
+
+        summaries = s.execute(
+            select(Summary).where(Summary.meeting_id == meeting_id)
+        ).scalars().all()
+
+        return MeetingDetail(
+            id=m.id, title=m.title, meeting_url=m.meeting_url, status=m.status,
+            started_at=m.started_at, ended_at=m.ended_at, recall_bot_id=m.recall_bot_id,
+            owner_name=m.owner_name,
+            utterances=[
+                UtteranceDTO(
+                    id=u.id, speaker_label=u.speaker_label, text=u.text,
+                    start_ms=u.start_ms, end_ms=u.end_ms, created_at=u.created_at,
+                ) for u in utts
+            ],
+            insights=[
+                InsightDTO(
+                    id=i.id, type=i.type, title=i.title, description=i.description,
+                    severity=i.severity,
+                    confidence=float(i.confidence) if i.confidence is not None else None,
+                    created_at=i.created_at,
+                    evidence_utterance_ids=ev_by_insight.get(i.id, []),
+                ) for i in insights
+            ],
+            action_items=[
+                ActionItemDTO(
+                    id=a.id, owner_name=a.owner_name, action_text=a.action_text,
+                    due_hint=a.due_hint, status=a.status,
+                ) for a in actions
+            ],
+            summaries=[
+                SummaryDTO(id=s.id, summary_type=s.summary_type, content_markdown=s.content_markdown)
+                for s in summaries
+            ],
         )
