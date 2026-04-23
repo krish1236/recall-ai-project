@@ -58,26 +58,26 @@ sequenceDiagram
 
     UI->>API: POST /meetings
     API->>Recall: create_bot
-    API->>DB: INSERT meeting (joining)
+    API->>DB: INSERT meeting as joining
     Note over Recall: bot joins, captions stream
 
     Recall->>API: POST /webhook/recall
     API->>API: verify svix signature
-    API->>DB: INSERT event (dedupe_key UNIQUE)
-    API->>S: XADD stream:meeting:{bot_id}
-    API-->>Recall: 200 OK (<50ms)
+    API->>DB: INSERT event, dedupe on UNIQUE key
+    API->>S: XADD stream per bot_id
+    API-->>Recall: 200 OK under 50ms
 
-    S->>Worker: XREADGROUP (event-time sorted)
-    Worker->>DB: project utterance + span
-    Worker->>Worker: batcher.enqueue
+    S->>Worker: XREADGROUP event-time sorted
+    Worker->>DB: project utterance and span
+    Worker->>Worker: batcher enqueue
 
-    Note over Worker: flush (size / time / fast-path)
-    alt prefilter sees no signal
-        Worker->>DB: mark classified; skip LLM
-    else prefilter sees signal
+    Note over Worker: flush on size / time / fast-path
+    alt Tier 0 regex sees no signal
+        Worker->>DB: mark classified, skip LLM
+    else Tier 0 regex sees signal
         Worker->>LLM: classify batch
-        LLM-->>Worker: signals
-        Worker->>DB: INSERT insights + evidence
+        LLM-->>Worker: signals JSON
+        Worker->>DB: INSERT insights and evidence
         Worker->>S: publish insights frame
     end
 ```
