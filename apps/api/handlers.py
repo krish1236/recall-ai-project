@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import Meeting, MeetingEvent, TranscriptUtterance
@@ -109,39 +110,77 @@ async def handle_status_change(event: MeetingEvent, session: Session) -> None:
         meeting.ended_at = event.event_timestamp
 
 
-async def handle_transcript_data(event: MeetingEvent, session: Session) -> None:
-    """Project a finalized transcript event into the transcript_utterances table.
+def _word_time(word: dict, key: str) -> float:
+    """Handle both flat (`start`/`end`) and nested (`start_timestamp.relative`) shapes."""
+    if key in word and word[key] is not None:
+        return float(word[key])
+    ts = word.get(f"{key}_timestamp")
+    if isinstance(ts, dict):
+        if "relative" in ts:
+            return float(ts["relative"])
+    return 0.0
 
-    Recall sends one event per finalized utterance; a single utterance contains
-    many word timings grouped by speaker. We flatten to a single row.
+
+def _extract_bot_id(payload: dict) -> Optional[str]:
+    outer = payload.get("data") or {}
+    bot = outer.get("bot")
+    if isinstance(bot, dict) and bot.get("id"):
+        return bot["id"]
+    return outer.get("bot_id") or payload.get("bot_id")
+
+
+async def _resolve_meeting_id(event: MeetingEvent, session: Session) -> Optional[Any]:
+    """Late-bind to a meeting row when the webhook arrived before the meeting
+    record existed (or after a truncate) — idempotent and cheap."""
+    if event.meeting_id is not None:
+        return event.meeting_id
+    bot_id = _extract_bot_id(event.payload_json)
+    if not bot_id:
+        return None
+    mid = session.execute(select(Meeting.id).where(Meeting.recall_bot_id == bot_id)).scalar_one_or_none()
+    if mid is not None:
+        event.meeting_id = mid  # persist the link for replay/debugging
+    return mid
+
+
+async def handle_transcript_data(event: MeetingEvent, session: Session) -> None:
+    """Project a finalized transcript event into transcript_utterances.
+
+    Recall's real payload nests utterance content at `payload.data.data` and uses
+    `start_timestamp.relative` / `end_timestamp.relative` (seconds from recording
+    start). We also accept the flatter shape some fixtures/tests use.
     """
-    if event.meeting_id is None:
-        log.debug("transcript.data with no meeting_id; dropping")
+    meeting_id = await _resolve_meeting_id(event, session)
+    if meeting_id is None:
+        log.debug("transcript.data with no resolvable meeting; dropping")
         return
-    data = event.payload_json.get("data") or {}
-    words = data.get("words") or []
+
+    outer = event.payload_json.get("data") or {}
+    inner = outer.get("data") if isinstance(outer.get("data"), dict) else None
+    body = inner if inner is not None else outer
+    words = body.get("words") or []
     if not words:
         return
 
     speaker = None
-    participant = data.get("participant")
+    participant = body.get("participant")
     if isinstance(participant, dict):
         speaker = participant.get("name") or participant.get("id")
     if speaker is None:
-        speaker = data.get("speaker") or words[0].get("speaker")
+        speaker = body.get("speaker") or words[0].get("speaker")
 
     text_parts = [w.get("text", "") for w in words if w.get("text")]
     text = " ".join(text_parts).strip()
     if not text:
         return
 
-    start = words[0].get("start") or 0.0
-    end = words[-1].get("end") or start
-    start_ms = int(float(start) * 1000)
-    end_ms = int(float(end) * 1000)
+    start_s = _word_time(words[0], "start")
+    end_s = _word_time(words[-1], "end") or start_s
+    start_ms = int(start_s * 1000)
+    end_ms = int(end_s * 1000)
 
     session.add(TranscriptUtterance(
-        meeting_id=event.meeting_id,
+        meeting_id=meeting_id,
         source_event_id=event.id,
         speaker_label=str(speaker) if speaker is not None else None,
         text=text,

@@ -88,11 +88,14 @@ class RecallClient:
         return await self._request("GET", f"/bot/{bot_id}")
 
 
+# Recall's realtime_endpoints only accept in-call events. Bot lifecycle
+# (requested → joining → in_call → done | fatal) is delivered via a separate
+# bot-status webhook configured independently; for now we drive state changes
+# from the in-call participant/transcript activity we already receive.
 DEFAULT_REALTIME_EVENTS = [
     "transcript.data",
     "transcript.partial_data",
     "participant_events.join",
     "participant_events.leave",
     "participant_events.chat_message",
-    "bot.status_change",
 ]
