@@ -108,12 +108,15 @@ class Worker:
         stream_names = [stream_key(b) for b in streams]
         for s in stream_names:
             await ensure_group(self.r, s)
+        # block=None → non-blocking (don't send BLOCK at all); Redis treats BLOCK 0 as infinite.
+        kwargs: dict = {"count": self.read_count}
+        if block_ms and block_ms > 0:
+            kwargs["block"] = block_ms
         result = await self.r.xreadgroup(
             GROUP_NAME,
             self.consumer_id,
             {s: ">" for s in stream_names},
-            count=self.read_count,
-            block=block_ms,
+            **kwargs,
         )
         if not result:
             return 0
