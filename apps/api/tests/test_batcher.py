@@ -34,7 +34,15 @@ def test_fast_path_patterns():
 @pytest.mark.asyncio
 async def test_size_trigger_flushes_at_threshold(db):
     m = _meeting(db)
-    utts = [_utt(db, m, f"filler message number {i}", start_ms=i * 1000) for i in range(5)]
+    # all of these hit the prefilter so the flush reaches the LLM
+    texts = [
+        "we need to decide on pricing",
+        "gong is cheaper than your quote",
+        "send the proposal this week",
+        "our budget is tight",
+        "need a discount",
+    ]
+    utts = [_utt(db, m, t, start_ms=i * 1000) for i, t in enumerate(texts)]
 
     fake = FakeAnthropic([{"signals": []}])
     classifier = SignalClassifier(client=fake)
@@ -79,7 +87,7 @@ async def test_fast_path_triggers_early_flush(db):
 @pytest.mark.asyncio
 async def test_time_trigger_via_explicit_timer_tick(db):
     m = _meeting(db)
-    u1 = _utt(db, m, "okay", 1000)
+    u1 = _utt(db, m, "the pricing is too high for our budget", 1000)
 
     fake = FakeAnthropic([{"signals": []}])
     classifier = SignalClassifier(client=fake)
@@ -105,7 +113,7 @@ async def test_time_trigger_via_explicit_timer_tick(db):
 async def test_context_is_prior_utterances_only(db):
     m = _meeting(db)
     prior = [_utt(db, m, f"prior {i}", start_ms=i * 1000) for i in range(8)]
-    batch = [_utt(db, m, "batch utterance", start_ms=10_000)]
+    batch = [_utt(db, m, "need Salesforce integration by Friday", start_ms=10_000)]
 
     captured: dict[str, Any] = {}
 
@@ -131,13 +139,13 @@ async def test_context_is_prior_utterances_only(db):
     assert "prior 0" not in user_msg
     assert "prior 1" not in user_msg
     # the batch utterance shows up in <batch>
-    assert "batch utterance" in user_msg
+    assert "Salesforce" in user_msg
 
 
 @pytest.mark.asyncio
 async def test_classifier_failure_lands_in_dlq(db):
     m = _meeting(db)
-    u1 = _utt(db, m, "anything", 1000)
+    u1 = _utt(db, m, "send the proposal by Friday", 1000)
 
     class ExplodingFake:
         calls = 0
@@ -165,7 +173,8 @@ async def test_classifier_failure_lands_in_dlq(db):
 async def test_backpressure_bounds_llm_calls(db):
     """Fire many utterances fast; batcher groups them into ≪ N calls."""
     m = _meeting(db)
-    utts = [_utt(db, m, f"utterance {i}", start_ms=i * 100) for i in range(100)]
+    # use signal-bearing text so the prefilter doesn't drop these
+    utts = [_utt(db, m, f"we need feature {i} by Friday", start_ms=i * 100) for i in range(100)]
 
     fake = FakeAnthropic([{"signals": []}] * 100)  # plenty of canned responses
     classifier = SignalClassifier(client=fake)
@@ -180,6 +189,6 @@ async def test_backpressure_bounds_llm_calls(db):
 
     # 100 utterances, threshold 5 → at most 20 calls, zero dropped utterances
     assert len(fake.calls) <= 20
-    # every utterance should have ended up in some call's prompt
-    total_in_prompts = sum("utterance" in call["messages"][0]["content"] for call in fake.calls)
-    assert total_in_prompts == len(fake.calls)
+    # every call's prompt carries at least one batch utterance
+    hit = sum("by Friday" in call["messages"][0]["content"] for call in fake.calls)
+    assert hit == len(fake.calls)
