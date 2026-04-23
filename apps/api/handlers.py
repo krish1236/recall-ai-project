@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import Meeting, MeetingEvent, TranscriptUtterance
+from spans import mark_now
 
 log = logging.getLogger("handlers")
 
@@ -194,6 +195,7 @@ async def handle_transcript_data(event: MeetingEvent, session: Session) -> Optio
     )
     session.add(utt)
     session.flush()
+    mark_now(session, utt.id, "persisted_at")
     return utt
 
 
@@ -237,6 +239,8 @@ def build_handlers(batcher: Optional[Any] = None) -> dict:
             "start_ms": utt.start_ms,
             "end_ms": utt.end_ms,
         })
+        mark_now(session, utt.id, "pushed_at")
+        session.commit()
         await batcher.enqueue(utt.meeting_id, utt.id, utt.text)
 
     return {

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from intelligence.breaker import CircuitOpenError
 from intelligence.classifier import SignalClassifier
 from models import DeadLetterJob, TranscriptUtterance
+from spans import mark_now
 
 log = logging.getLogger("batcher")
 
@@ -87,6 +88,12 @@ class Batcher:
             buf.append(utterance_id)
             if len(buf) >= self.size_threshold or fast_path_hit(text or ""):
                 should_flush = True
+        session = self.session_factory()
+        try:
+            mark_now(session, utterance_id, "enqueued_at")
+            session.commit()
+        finally:
+            session.close()
         if should_flush:
             self._schedule_flush(meeting_id)
 
@@ -134,6 +141,8 @@ class Batcher:
                 insights, outcome = await self.classifier.classify_and_persist(
                     session, meeting_id, batch, context,
                 )
+                for u in batch:
+                    mark_now(session, u.id, "classified_at")
                 session.commit()
                 log.info(
                     "flushed meeting=%s batch=%d ctx=%d insights=%d outcome=%s",
