@@ -7,7 +7,16 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
+# Walk up from cwd to find a .env (no-op if none exists, e.g. in containers
+# where Railway injects env vars directly). Override=True so an empty shell
+# value doesn't shadow the .env value.
+_env = Path(__file__).resolve().parent
+for _ in range(4):
+    candidate = _env / ".env"
+    if candidate.exists():
+        load_dotenv(candidate, override=True)
+        break
+    _env = _env.parent
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
