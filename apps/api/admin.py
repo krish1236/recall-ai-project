@@ -5,12 +5,23 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
+from datetime import timedelta
+
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import desc, select
+from sqlalchemy import delete, desc, select
 
 from db import SessionLocal
-from models import DeadLetterJob
+from models import (
+    ActionItem,
+    DeadLetterJob,
+    Insight,
+    InsightEvidence,
+    Meeting,
+    Summary,
+    TranscriptUtterance,
+    UtteranceSpan,
+)
 
 log = logging.getLogger("admin")
 
@@ -153,6 +164,92 @@ async def _retry_synthesize(job_id: UUID, meeting_id: Optional[UUID]) -> RetryRe
 
     _update_job(job_id, attempt_incr=1, resolve=True)
     return RetryResult(id=job_id, status="resolved")
+
+
+DEMO_MEETING_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+_DEMO_UTTERANCES: list[tuple[str, str, int]] = [
+    ("rep", "Hey thanks for hopping on the call.", 1000),
+    ("customer", "Yeah happy to. We've been comparing a few tools.", 3500),
+    ("rep", "What are you looking at?", 6500),
+    ("customer", "Honestly mostly Gong and Fireflies. The price on Gong is about half yours right now.", 8000),
+    ("rep", "Understood. Can you tell me more about what pricing tier you need?", 12500),
+    ("customer", "We really need Salesforce sync and that's non-negotiable for our sales team.", 15500),
+    ("rep", "Got it. And on timeline?", 19500),
+    ("customer", "We need to decide by end of next week. Can you send over a proposal by Friday?", 21000),
+]
+
+
+@router.post("/seed-demo")
+async def seed_demo() -> dict:
+    """Idempotently create the canonical Acme-discovery demo meeting with
+    real classifier + synthesizer output. Intended for one-click seeding of
+    an empty prod database so the Inbox has something interesting to show."""
+    from intelligence.classifier import AnthropicClient, SignalClassifier
+    from intelligence.synthesizer import Synthesizer
+
+    mid = DEMO_MEETING_ID
+    now = datetime.now(tz=timezone.utc)
+    started = now - timedelta(minutes=5)
+
+    with SessionLocal() as s:
+        existing = s.get(Meeting, mid)
+        if existing is None:
+            s.add(Meeting(
+                id=mid,
+                title="Acme Q2 discovery",
+                meeting_url="https://meet.google.com/demo-acme",
+                meeting_type="discovery",
+                owner_name="rep@acme.com",
+                status="in_call",
+                recall_bot_id="bot_demo_seed",
+                started_at=started,
+            ))
+
+        # wipe derived rows so re-seeding is clean
+        insight_ids = select(Insight.id).where(Insight.meeting_id == mid).scalar_subquery()
+        utt_ids = select(TranscriptUtterance.id).where(TranscriptUtterance.meeting_id == mid).scalar_subquery()
+        s.execute(delete(InsightEvidence).where(InsightEvidence.insight_id.in_(insight_ids)))
+        s.execute(delete(Insight).where(Insight.meeting_id == mid))
+        s.execute(delete(ActionItem).where(ActionItem.meeting_id == mid))
+        s.execute(delete(Summary).where(Summary.meeting_id == mid))
+        s.execute(delete(UtteranceSpan).where(UtteranceSpan.utterance_id.in_(utt_ids)))
+        s.execute(delete(TranscriptUtterance).where(TranscriptUtterance.meeting_id == mid))
+
+        for speaker, text, start_ms in _DEMO_UTTERANCES:
+            s.add(TranscriptUtterance(
+                meeting_id=mid, text=text, speaker_label=speaker,
+                is_partial=False, start_ms=start_ms, end_ms=start_ms + 2000,
+            ))
+        s.commit()
+
+    client = AnthropicClient()
+    classifier = SignalClassifier(client=client)
+    with SessionLocal() as s:
+        utts = s.execute(
+            select(TranscriptUtterance)
+            .where(TranscriptUtterance.meeting_id == mid)
+            .order_by(TranscriptUtterance.start_ms)
+        ).scalars().all()
+        insights, _ = await classifier.classify_and_persist(s, mid, list(utts), [])
+        s.commit()
+
+    synth = Synthesizer(client=client)
+    with SessionLocal() as s:
+        output, _ = await synth.synthesize_and_persist(s, mid)
+        m = s.get(Meeting, mid)
+        m.status = "done"
+        m.state_changed_at = now
+        m.ended_at = now
+        s.commit()
+
+    return {
+        "meeting_id": str(mid),
+        "status": "seeded",
+        "utterances": len(_DEMO_UTTERANCES),
+        "insights": len(insights),
+        "synthesis": output is not None,
+    }
 
 
 @router.post("/replay/{meeting_id}")
