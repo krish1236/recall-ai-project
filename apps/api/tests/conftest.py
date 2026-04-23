@@ -53,6 +53,8 @@ def _truncate():
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"))
     _flush_redis_sync()
+    from intelligence.breaker import reset_breaker
+    reset_breaker("llm")
     yield
 
 

@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from intelligence.breaker import CircuitOpenError
 from intelligence.classifier import SignalClassifier
 from models import DeadLetterJob, TranscriptUtterance
 
@@ -156,7 +157,14 @@ class Batcher:
                 return len(insights)
             except Exception as e:  # noqa: BLE001
                 session.rollback()
-                log.exception("classifier failed for meeting=%s: %s", meeting_id, e)
+                is_circuit_open = isinstance(e, CircuitOpenError)
+                if is_circuit_open:
+                    log.info(
+                        "classifier circuit-open for meeting=%s, batch→DLQ: %s",
+                        meeting_id, e,
+                    )
+                else:
+                    log.exception("classifier failed for meeting=%s: %s", meeting_id, e)
                 session.add(DeadLetterJob(
                     job_kind="classify",
                     meeting_id=meeting_id,
@@ -165,7 +173,7 @@ class Batcher:
                     },
                     error=str(e)[:1000],
                     attempt_count=1,
-                    status="open",
+                    status="circuit_open" if is_circuit_open else "open",
                 ))
                 session.commit()
                 return 0

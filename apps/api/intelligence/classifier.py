@@ -7,6 +7,7 @@ from typing import Any, Optional, Protocol
 
 from sqlalchemy.orm import Session
 
+from intelligence.breaker import get_breaker
 from intelligence.cache import compute_cache_key, get_or_call, pricing_usd
 from models import Insight, InsightEvidence, TranscriptUtterance
 
@@ -171,16 +172,21 @@ class SignalClassifier:
             TOOL_SCHEMA,
         )
 
+        breaker = get_breaker("llm")
+
         async def call_llm() -> dict:
-            result = await self.client.create_message(
-                model=self.model,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": user_prompt}],
-                tools=[TOOL_SCHEMA],
-                tool_choice={"type": "tool", "name": TOOL_NAME},
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-            )
+            async def fire() -> dict:
+                return await self.client.create_message(
+                    model=self.model,
+                    system=SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_prompt}],
+                    tools=[TOOL_SCHEMA],
+                    tool_choice={"type": "tool", "name": TOOL_NAME},
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+
+            result = await breaker.call(fire)
             t_in = int(result.get("token_in", 0))
             t_out = int(result.get("token_out", 0))
             return {
