@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db import SessionLocal
 from models import Meeting, MeetingEvent, WebhookDelivery
+from streams import dispatch_event
 
 router = APIRouter(tags=["webhook"])
 
@@ -134,6 +135,7 @@ async def ingest(
                 outcome = "duplicate"
         else:
             outcome = "missing_bot_id"
+            inserted = None
 
         s.add(WebhookDelivery(
             meeting_id=meeting_id,
@@ -144,5 +146,8 @@ async def ingest(
             response_code=200,
         ))
         s.commit()
+
+    if outcome == "accepted" and inserted is not None and bot_id:
+        await dispatch_event(bot_id, inserted, event_type, event_ts)
 
     return {"status": outcome, "event_type": event_type}

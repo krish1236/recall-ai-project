@@ -46,7 +46,18 @@ def _verify_tables_exist():
 def _truncate():
     with engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"))
+    _flush_redis_sync()
     yield
+
+
+def _flush_redis_sync() -> None:
+    import redis as _redis_sync
+    url = os.environ.get("REDIS_URL", "redis://localhost:56379")
+    r = _redis_sync.from_url(url)
+    try:
+        r.flushdb()
+    finally:
+        r.close()
 
 
 @pytest.fixture
