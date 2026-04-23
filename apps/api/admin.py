@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import desc, select
 
@@ -153,6 +153,23 @@ async def _retry_synthesize(job_id: UUID, meeting_id: Optional[UUID]) -> RetryRe
 
     _update_job(job_id, attempt_incr=1, resolve=True)
     return RetryResult(id=job_id, status="resolved")
+
+
+@router.post("/replay/{meeting_id}")
+async def replay_meeting_route(meeting_id: UUID, bg: BackgroundTasks) -> dict:
+    """Kick off a deterministic replay of the meeting's event log. Returns
+    immediately; the UI should re-fetch the meeting detail + ops after a short
+    delay (or react to subsequent pub/sub state frames)."""
+    from replay import replay_meeting as _replay
+
+    async def _runner() -> None:
+        try:
+            await _replay(meeting_id)
+        except Exception:  # noqa: BLE001
+            log.exception("replay failed for meeting %s", meeting_id)
+
+    bg.add_task(_runner)
+    return {"meeting_id": str(meeting_id), "status": "queued"}
 
 
 def _update_job(

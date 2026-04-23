@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from admin import router as admin_router
 from live import router as live_router
 from meetings import router as meetings_router
+from ops import router as ops_router
 from webhook import router as webhook_router
 
 app = FastAPI(title="recall-ai api")
@@ -18,6 +19,7 @@ app.add_middleware(
 
 app.include_router(webhook_router)
 app.include_router(meetings_router)
+app.include_router(ops_router)
 app.include_router(live_router)
 app.include_router(admin_router)
 
