@@ -162,8 +162,4 @@ make test
 
 ---
 
-## Status
-
-Working prototype through Phase 9 — all ten hard problems from the architecture (`docs/architecture.md`) are implemented. Deployment (Vercel + Railway), load-test harness, seed mode, and an engineering write-up remain.
-
 Repo: [github.com/krish1236/recall-ai-project](https://github.com/krish1236/recall-ai-project)
