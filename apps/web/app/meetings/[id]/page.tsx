@@ -129,7 +129,7 @@ export default function MeetingPage({
           <StatusPill status={status} />
           <WsDot conn={liveState.state} lastFrameAt={liveState.lastFrameAt} />
         </div>
-        <p className="text-sm text-[var(--muted)] mt-1">
+        <div className="flex items-center gap-4 mt-1 text-sm text-[var(--muted)]">
           {meeting.meeting_url ? (
             <a
               href={meeting.meeting_url}
@@ -143,11 +143,17 @@ export default function MeetingPage({
             <span>no url</span>
           )}
           {meeting.recall_bot_id && (
-            <span className="ml-3 font-mono text-xs">
+            <span className="font-mono text-xs">
               bot {meeting.recall_bot_id.slice(0, 12)}…
             </span>
           )}
-        </p>
+          <Link
+            href={`/meetings/${id}/ops`}
+            className="ml-auto text-xs px-2.5 py-1 rounded-md border hairline hover:bg-[var(--surface)] transition"
+          >
+            Mission Control →
+          </Link>
+        </div>
       </div>
 
       {isLive ? (

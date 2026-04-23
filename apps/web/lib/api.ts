@@ -113,6 +113,93 @@ export async function crmPush(id: string) {
   return handle<{ meeting_id: string; pushed_at: string }>(r);
 }
 
+export type OpsEvent = {
+  id: number;
+  source: string;
+  event_type: string;
+  event_timestamp: string;
+  received_at: string;
+  persisted_at: string;
+  dedupe_key: string;
+  signature_valid: boolean;
+};
+
+export type OpsDelivery = {
+  id: number;
+  event_type: string | null;
+  signature_valid: boolean;
+  response_code: number | null;
+  attempt_count: number;
+  received_at: string;
+  remote_addr: string | null;
+};
+
+export type OpsSpan = {
+  utterance_id: string;
+  text: string;
+  speaker_label: string | null;
+  start_ms: number | null;
+  received_at: string | null;
+  persisted_at: string | null;
+  enqueued_at: string | null;
+  classified_at: string | null;
+  pushed_at: string | null;
+  end_to_end_ms: number | null;
+};
+
+export type OpsDLQ = {
+  id: string;
+  job_kind: string;
+  error: string | null;
+  status: string;
+  attempt_count: number;
+  created_at: string;
+};
+
+export type OpsMetrics = {
+  events_accepted: number;
+  webhook_deliveries_ok: number;
+  webhook_deliveries_bad_sig: number;
+  duplicates_absorbed: number;
+  utterance_count: number;
+  p50_end_to_end_ms: number | null;
+  p95_end_to_end_ms: number | null;
+  p99_end_to_end_ms: number | null;
+};
+
+export type OpsResponse = {
+  meeting_id: string;
+  status: string;
+  events: OpsEvent[];
+  deliveries: OpsDelivery[];
+  utterance_spans: OpsSpan[];
+  dlq: OpsDLQ[];
+  metrics: OpsMetrics;
+};
+
+export async function getMeetingOps(id: string, opts?: { signal?: AbortSignal }) {
+  const r = await fetch(`${API_URL}/meetings/${id}/ops`, {
+    cache: "no-store",
+    signal: opts?.signal,
+  });
+  return handle<OpsResponse>(r);
+}
+
+export async function replayMeeting(id: string) {
+  const r = await fetch(`${API_URL}/admin/replay/${id}`, { method: "POST" });
+  return handle<{ meeting_id: string; status: string }>(r);
+}
+
+export async function retryDlq(jobId: string) {
+  const r = await fetch(`${API_URL}/admin/dlq/${jobId}/retry`, { method: "POST" });
+  return handle<{ id: string; status: string; detail?: string }>(r);
+}
+
+export async function resolveDlq(jobId: string) {
+  const r = await fetch(`${API_URL}/admin/dlq/${jobId}/resolve`, { method: "POST" });
+  return handle<{ id: string; status: string }>(r);
+}
+
 export function liveWebsocketUrl(meetingId: string): string {
   const base = API_URL.replace(/^http/, "ws");
   return `${base}/live/${meetingId}`;
