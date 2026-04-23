@@ -10,6 +10,7 @@ from typing import Awaitable, Callable, Optional
 from sqlalchemy.orm import Session
 
 from db import SessionLocal
+from handlers import DEFAULT_HANDLERS, handle_unknown
 from models import DeadLetterJob, MeetingEvent
 from streams import (
     GROUP_NAME,
@@ -28,38 +29,8 @@ def _parse_ts(s: str) -> datetime:
     except Exception:
         return datetime.min.replace(tzinfo=timezone.utc)
 
+
 Handler = Callable[[MeetingEvent, Session], Awaitable[None]]
-
-
-async def handle_transcript_data(event: MeetingEvent, session: Session) -> None:
-    words = (event.payload_json.get("data") or {}).get("words") or []
-    first = words[0] if words else {}
-    log.info(
-        "transcript.data meeting=%s speaker=%s text=%r",
-        event.meeting_id, first.get("speaker"), (first.get("text") or "")[:80],
-    )
-
-
-async def handle_transcript_partial(event: MeetingEvent, session: Session) -> None:
-    pass
-
-
-async def handle_status_change(event: MeetingEvent, session: Session) -> None:
-    data = event.payload_json.get("data") or {}
-    status = (data.get("status") or {}).get("code") or data.get("status")
-    log.info("bot.status_change meeting=%s status=%s", event.meeting_id, status)
-
-
-async def handle_unknown(event: MeetingEvent, session: Session) -> None:
-    log.warning("unknown event_type=%s", event.event_type)
-
-
-DEFAULT_HANDLERS: dict[str, Handler] = {
-    "transcript.data": handle_transcript_data,
-    "transcript.partial_data": handle_transcript_partial,
-    "bot.status_change": handle_status_change,
-    "__default__": handle_unknown,
-}
 
 
 class Worker:
