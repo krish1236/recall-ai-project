@@ -1,4 +1,4 @@
-.PHONY: api web install infra.up infra.down infra.logs db.migrate test
+.PHONY: api web worker install infra.up infra.down infra.logs db.migrate test
 
 install:
 	cd apps/api && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
@@ -6,6 +6,9 @@ install:
 
 api:
 	cd apps/api && .venv/bin/uvicorn main:app --reload --port 8000
+
+worker:
+	cd apps/api && .venv/bin/python worker.py
 
 web:
 	cd apps/web && npm run dev
