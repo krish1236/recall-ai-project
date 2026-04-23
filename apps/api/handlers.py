@@ -108,6 +108,11 @@ async def handle_status_change(event: MeetingEvent, session: Session) -> None:
         meeting.started_at = event.event_timestamp
     elif target in ("done", "failed") and meeting.ended_at is None:
         meeting.ended_at = event.event_timestamp
+    # Publish before the worker commits — on the rare rollback path the UI
+    # would see a state that never landed, but state changes are near-always
+    # durable and the live frame is idempotent client-side.
+    from streams import publish_live
+    await publish_live(meeting.id, "state", {"status": target, "state_changed_at": event.event_timestamp})
 
 
 def _word_time(word: dict, key: str) -> float:
@@ -223,6 +228,15 @@ def build_handlers(batcher: Optional[Any] = None) -> dict:
             return
         # Commit so the batcher's flush task (separate session) can read the row.
         session.commit()
+        # Fire-and-forget live update for any connected WebSocket subscriber.
+        from streams import publish_live
+        await publish_live(utt.meeting_id, "utterance", {
+            "id": str(utt.id),
+            "speaker_label": utt.speaker_label,
+            "text": utt.text,
+            "start_ms": utt.start_ms,
+            "end_ms": utt.end_ms,
+        })
         await batcher.enqueue(utt.meeting_id, utt.id, utt.text)
 
     return {

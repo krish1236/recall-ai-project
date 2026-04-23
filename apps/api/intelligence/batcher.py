@@ -138,6 +138,21 @@ class Batcher:
                     "flushed meeting=%s batch=%d ctx=%d insights=%d outcome=%s",
                     meeting_id, len(batch), len(context), len(insights), outcome,
                 )
+                if insights:
+                    from streams import publish_live
+                    await publish_live(meeting_id, "insights", {
+                        "insights": [
+                            {
+                                "id": str(i.id),
+                                "type": i.type,
+                                "title": i.title,
+                                "description": i.description,
+                                "severity": i.severity,
+                                "confidence": float(i.confidence) if i.confidence is not None else None,
+                            }
+                            for i in insights
+                        ],
+                    })
                 return len(insights)
             except Exception as e:  # noqa: BLE001
                 session.rollback()

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
+import uuid
 from datetime import datetime
+from typing import Any
 
 import redis.asyncio as redis_async
 
@@ -11,6 +14,35 @@ GROUP_NAME = "workers"
 
 def stream_key(bot_id: str) -> str:
     return f"stream:meeting:{bot_id}"
+
+
+def live_channel(meeting_id: uuid.UUID | str) -> str:
+    return f"live:{meeting_id}"
+
+
+def _default_encode(o: Any) -> Any:
+    if isinstance(o, (uuid.UUID,)):
+        return str(o)
+    if isinstance(o, datetime):
+        return o.isoformat()
+    raise TypeError(f"can't encode {type(o).__name__}")
+
+
+async def publish_live(meeting_id: uuid.UUID | str, event_type: str, payload: dict) -> None:
+    """Fire a live-update frame onto the meeting's pub/sub channel so any
+    connected WebSocket subscriber sees it. Best-effort — publish failures are
+    swallowed since they must never block the committing write path."""
+    message = {"type": event_type, **payload}
+    r = make_client()
+    try:
+        await r.publish(
+            live_channel(meeting_id),
+            json.dumps(message, default=_default_encode),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        await r.aclose()
 
 
 def redis_url() -> str:
