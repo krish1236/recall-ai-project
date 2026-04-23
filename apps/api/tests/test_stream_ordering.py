@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from tests._helpers import make_payload, sign
+from tests._helpers import make_payload, svix_headers
 from worker import Worker
 
 
@@ -21,11 +21,7 @@ def _fire_webhooks(timestamps: list[str], bot_id: str) -> None:
     for ts in timestamps:
         payload = make_payload(bot_id=bot_id, event="transcript.data", timestamp=ts)
         raw = json.dumps(payload).encode()
-        r = c.post(
-            "/webhook/recall",
-            content=raw,
-            headers={"x-recall-signature": sign(raw), "content-type": "application/json"},
-        )
+        r = c.post("/webhook/recall", content=raw, headers=svix_headers(raw))
         assert r.status_code == 200, r.text
 
 

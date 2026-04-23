@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from models import MeetingEvent, WebhookDelivery
-from tests._helpers import make_payload, sign
+from tests._helpers import make_payload, svix_headers
 
 
 def _client():
@@ -22,24 +22,21 @@ def test_replay_50_produces_one_event_and_fifty_deliveries(db):
         timestamp="2026-04-22T10:00:00+00:00",
     )
     raw = json.dumps(payload).encode()
-    headers = {"x-recall-signature": sign(raw), "content-type": "application/json"}
+    # Same svix-id reused 50x — models "Recall retried the same delivery 50 times"
+    fixed_msg_id = "msg_idempotency_test"
+    headers = svix_headers(raw, msg_id=fixed_msg_id)
 
     outcomes: list[str] = []
     for _ in range(50):
         r = c.post("/webhook/recall", content=raw, headers=headers)
-        assert r.status_code == 200
+        assert r.status_code == 200, r.text
         outcomes.append(r.json()["status"])
 
     assert outcomes[0] == "accepted"
     assert outcomes[1:].count("duplicate") == 49
 
-    event_count = db.execute(
-        select(func.count()).select_from(MeetingEvent)
-    ).scalar_one()
-    delivery_count = db.execute(
-        select(func.count()).select_from(WebhookDelivery)
-    ).scalar_one()
-
+    event_count = db.execute(select(func.count()).select_from(MeetingEvent)).scalar_one()
+    delivery_count = db.execute(select(func.count()).select_from(WebhookDelivery)).scalar_one()
     assert event_count == 1
     assert delivery_count == 50
 
@@ -54,15 +51,9 @@ def test_different_payloads_do_not_collide(db):
             text=f"utterance {i}",
         )
         raw = json.dumps(payload).encode()
-        r = c.post(
-            "/webhook/recall",
-            content=raw,
-            headers={"x-recall-signature": sign(raw), "content-type": "application/json"},
-        )
+        r = c.post("/webhook/recall", content=raw, headers=svix_headers(raw))
         assert r.status_code == 200
         assert r.json()["status"] == "accepted"
 
-    event_count = db.execute(
-        select(func.count()).select_from(MeetingEvent)
-    ).scalar_one()
+    event_count = db.execute(select(func.count()).select_from(MeetingEvent)).scalar_one()
     assert event_count == 5

@@ -5,7 +5,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-from tests._helpers import make_payload, sign
+from tests._helpers import make_payload, svix_headers
 
 
 def _client():
@@ -35,7 +35,7 @@ def test_ingest_p99_under_budget(db):
             text=f"utterance {i}",
         )
         raw = json.dumps(payload).encode()
-        headers = {"x-recall-signature": sign(raw), "content-type": "application/json"}
+        headers = svix_headers(raw)
 
         t0 = time.perf_counter()
         r = c.post("/webhook/recall", content=raw, headers=headers)

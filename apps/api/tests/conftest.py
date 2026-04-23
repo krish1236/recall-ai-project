@@ -10,7 +10,14 @@ from sqlalchemy import text
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
-os.environ.setdefault("RECALL_WEBHOOK_SECRET", "test-webhook-secret-do-not-use-in-prod")
+# Force-override any value loaded from .env so tests always use a deterministic
+# test secret (whsec_ format matching Recall/Svix).
+from tests._helpers import TEST_SECRET  # noqa: E402
+
+os.environ["RECALL_WEBHOOK_SECRET"] = TEST_SECRET
+# Route tests to a dedicated Redis DB so a live dev worker (db=0) can run
+# concurrently without racing on consumer-group state.
+os.environ["REDIS_URL"] = "redis://localhost:56379/1"
 
 from db import SessionLocal, engine  # noqa: E402
 from models import Base  # noqa: E402
