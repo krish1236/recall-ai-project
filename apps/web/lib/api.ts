@@ -103,6 +103,16 @@ export async function createMeeting(body: {
   return handle<{ meeting_id: string; recall_bot_id: string | null; status: string }>(r);
 }
 
+export async function finalizeMeeting(id: string) {
+  const r = await fetch(`${API_URL}/meetings/${id}/finalize`, { method: "POST" });
+  return handle<{ meeting_id: string; status: string }>(r);
+}
+
+export async function crmPush(id: string) {
+  const r = await fetch(`${API_URL}/meetings/${id}/crm-push`, { method: "POST" });
+  return handle<{ meeting_id: string; pushed_at: string }>(r);
+}
+
 export function liveWebsocketUrl(meetingId: string): string {
   const base = API_URL.replace(/^http/, "ws");
   return `${base}/live/${meetingId}`;

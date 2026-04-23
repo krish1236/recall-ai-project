@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  crmPush,
+  finalizeMeeting,
   getMeeting,
   type Insight,
   type MeetingDetail,
@@ -40,43 +42,65 @@ export default function MeetingPage({
     };
   }, [id]);
 
-  const onFrame = useCallback((frame: LiveFrame) => {
-    if (frame.type === "utterance") {
-      setUtterances((prev) => {
-        if (prev.some((u) => u.id === frame.id)) return prev;
-        return [
-          ...prev,
-          {
-            id: frame.id,
-            speaker_label: frame.speaker_label,
-            text: frame.text,
-            start_ms: frame.start_ms,
-            end_ms: frame.end_ms,
-            created_at: new Date().toISOString(),
-          },
-        ];
-      });
-    } else if (frame.type === "insights") {
-      setInsights((prev) => {
-        const existing = new Set(prev.map((i) => i.id));
-        const incoming = frame.insights
-          .filter((i) => !existing.has(i.id))
-          .map((i) => ({
-            id: i.id,
-            type: i.type,
-            title: i.title,
-            description: i.description,
-            severity: i.severity,
-            confidence: i.confidence,
-            created_at: new Date().toISOString(),
-            evidence_utterance_ids: [] as string[],
-          }));
-        return [...prev, ...incoming];
-      });
-    } else if (frame.type === "state") {
-      setStatus(frame.status);
+  const refetch = useCallback(async () => {
+    try {
+      const m = await getMeeting(id);
+      setMeeting(m);
+      setUtterances(m.utterances);
+      setInsights(m.insights);
+      setStatus(m.status);
+    } catch {
+      /* ignore transient refetch errors */
     }
-  }, []);
+  }, [id]);
+
+  const onFrame = useCallback(
+    (frame: LiveFrame) => {
+      if (frame.type === "utterance") {
+        setUtterances((prev) => {
+          if (prev.some((u) => u.id === frame.id)) return prev;
+          return [
+            ...prev,
+            {
+              id: frame.id,
+              speaker_label: frame.speaker_label,
+              text: frame.text,
+              start_ms: frame.start_ms,
+              end_ms: frame.end_ms,
+              created_at: new Date().toISOString(),
+            },
+          ];
+        });
+      } else if (frame.type === "insights") {
+        setInsights((prev) => {
+          const existing = new Set(prev.map((i) => i.id));
+          const incoming = frame.insights
+            .filter((i) => !existing.has(i.id))
+            .map((i) => ({
+              id: i.id,
+              type: i.type,
+              title: i.title,
+              description: i.description,
+              severity: i.severity,
+              confidence: i.confidence,
+              created_at: new Date().toISOString(),
+              evidence_utterance_ids: [] as string[],
+            }));
+          return [...prev, ...incoming];
+        });
+      } else if (frame.type === "state") {
+        setStatus(frame.status);
+        // On terminal transitions, refetch the full detail so summaries +
+        // evidence links load in.
+        if (frame.status === "done" || frame.status === "failed") {
+          refetch();
+        }
+      } else if (frame.type === "summary_ready") {
+        refetch();
+      }
+    },
+    [refetch],
+  );
 
   const liveState = useLive(id, onFrame);
   const isLive = LIVE_STATES.has(status);
@@ -127,12 +151,19 @@ export default function MeetingPage({
       </div>
 
       {isLive ? (
-        <LiveLayout utterances={utterances} insights={insights} />
+        <LiveLayout
+          meetingId={id}
+          status={status}
+          utterances={utterances}
+          insights={insights}
+        />
       ) : (
         <IntelligenceLayout
+          meetingId={id}
           meeting={meeting}
           utterances={utterances}
           insights={insights}
+          currentStatus={status}
         />
       )}
     </div>
@@ -140,19 +171,51 @@ export default function MeetingPage({
 }
 
 function LiveLayout({
+  meetingId,
+  status,
   utterances,
   insights,
 }: {
+  meetingId: string;
+  status: string;
   utterances: Utterance[];
   insights: Insight[];
 }) {
+  const [finalizing, setFinalizing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function onFinalize() {
+    if (finalizing) return;
+    setFinalizing(true);
+    setError(null);
+    try {
+      await finalizeMeeting(meetingId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "finalize failed");
+      setFinalizing(false);
+    }
+  }
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-6">
       <div className="border hairline rounded-lg bg-[var(--surface)]/50">
-        <div className="px-4 py-2 border-b hairline text-xs uppercase tracking-wider text-[var(--muted)]">
-          Transcript ({utterances.length})
+        <div className="px-4 py-2 border-b hairline flex items-center justify-between">
+          <span className="text-xs uppercase tracking-wider text-[var(--muted)]">
+            Transcript ({utterances.length})
+          </span>
+          <button
+            type="button"
+            onClick={onFinalize}
+            disabled={finalizing || status !== "in_call"}
+            className="text-xs px-3 py-1 rounded-md bg-[var(--accent)] text-white hover:brightness-110 transition disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {finalizing ? "Finalizing…" : "End & synthesize"}
+          </button>
         </div>
         <TranscriptPanel utterances={utterances} />
+        {error && (
+          <div className="px-4 py-2 text-xs text-red-400 border-t hairline">{error}</div>
+        )}
       </div>
       <aside className="space-y-4">
         <div className="border hairline rounded-lg bg-[var(--surface)]/50">
@@ -178,14 +241,33 @@ function LiveLayout({
 }
 
 function IntelligenceLayout({
+  meetingId,
   meeting,
   utterances,
   insights,
+  currentStatus,
 }: {
+  meetingId: string;
   meeting: MeetingDetail;
   utterances: Utterance[];
   insights: Insight[];
+  currentStatus: string;
 }) {
+  const [pushing, setPushing] = useState(false);
+  const [pushedAt, setPushedAt] = useState<string | null>(null);
+  const [pushError, setPushError] = useState<string | null>(null);
+  async function onPushCrm() {
+    if (pushing) return;
+    setPushing(true); setPushError(null);
+    try {
+      const res = await crmPush(meetingId);
+      setPushedAt(res.pushed_at);
+    } catch (e) {
+      setPushError(e instanceof Error ? e.message : "push failed");
+    } finally {
+      setPushing(false);
+    }
+  }
   const insightsByType = useMemo(() => {
     const m: Record<string, Insight[]> = {};
     for (const i of insights) {
@@ -214,9 +296,17 @@ function IntelligenceLayout({
   const followup = meeting.summaries.find((s) => s.summary_type === "followup_email");
   const crmNote = meeting.summaries.find((s) => s.summary_type === "crm_note");
 
+  const isProcessing = currentStatus === "processing";
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-6">
       <div className="space-y-5">
+        {isProcessing && (
+          <div className="border hairline rounded-lg bg-[var(--surface)]/50 p-4 text-sm text-[var(--muted)] flex items-center gap-3">
+            <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+            Synthesizing summary, action items, and follow-up email…
+          </div>
+        )}
         {execSummary && (
           <Card title="Summary">
             <Markdownish text={execSummary.content_markdown} />
@@ -295,10 +385,26 @@ function IntelligenceLayout({
         )}
 
         {crmNote && (
-          <Card title="CRM note" action={<CopyButton text={crmNote.content_markdown} />}>
+          <Card
+            title="CRM note"
+            action={
+              <div className="flex items-center gap-3">
+                <CopyButton text={crmNote.content_markdown} />
+                <button
+                  type="button"
+                  onClick={onPushCrm}
+                  disabled={pushing}
+                  className="text-xs px-2.5 py-1 rounded-md bg-[var(--accent)] text-white hover:brightness-110 transition disabled:opacity-50"
+                >
+                  {pushing ? "pushing…" : pushedAt ? "pushed ✓" : "push to CRM"}
+                </button>
+              </div>
+            }
+          >
             <pre className="text-sm whitespace-pre-wrap font-sans text-[var(--foreground)]/90">
               {crmNote.content_markdown}
             </pre>
+            {pushError && <div className="text-xs text-red-400 mt-2">{pushError}</div>}
           </Card>
         )}
       </div>

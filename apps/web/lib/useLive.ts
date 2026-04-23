@@ -28,7 +28,9 @@ export type LiveFrame =
       type: "state";
       status: string;
       state_changed_at: string;
-    };
+    }
+  | { type: "summary_ready" }
+  | { type: "crm_pushed"; at: string };
 
 export type ConnState = "connecting" | "open" | "closed" | "error";
 
