@@ -6,13 +6,14 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 
 from db import SessionLocal
-from models import ActionItem, Insight, InsightEvidence, Meeting, Summary, TranscriptUtterance
+from models import ActionItem, DeadLetterJob, Insight, InsightEvidence, Meeting, MeetingEvent, Summary, TranscriptUtterance
 from recall_client import DEFAULT_REALTIME_EVENTS, RecallClient, RecallError
+from streams import publish_live
 
 log = logging.getLogger("meetings")
 
@@ -193,6 +194,108 @@ async def list_meetings(
                 insight_count=count, has_high_severity=has_high,
             ))
         return out
+
+
+@router.post("/meetings/{meeting_id}/finalize", status_code=202)
+async def finalize_meeting(meeting_id: UUID, bg: BackgroundTasks) -> dict:
+    """Simulate end-of-call: move to processing and kick off synthesis."""
+    now = datetime.now(tz=timezone.utc)
+    with SessionLocal() as s:
+        m = s.get(Meeting, meeting_id)
+        if m is None:
+            raise HTTPException(404, "meeting not found")
+        if m.status in ("done", "failed"):
+            return {"meeting_id": str(meeting_id), "status": m.status, "note": "already terminal"}
+        m.status = "processing"
+        m.state_changed_at = now
+        if m.ended_at is None:
+            m.ended_at = now
+        s.commit()
+
+    await publish_live(meeting_id, "state", {"status": "processing", "state_changed_at": now.isoformat()})
+    bg.add_task(_run_synthesis, meeting_id)
+    return {"meeting_id": str(meeting_id), "status": "processing"}
+
+
+async def _run_synthesis(meeting_id: UUID) -> None:
+    from intelligence.classifier import AnthropicClient
+    from intelligence.synthesizer import Synthesizer
+
+    log.info("synthesis started for meeting %s", meeting_id)
+    try:
+        client = AnthropicClient()
+        synth = Synthesizer(client=client)
+        with SessionLocal() as s:
+            output, outcome = await synth.synthesize_and_persist(s, meeting_id)
+            s.commit()
+    except Exception as e:  # noqa: BLE001
+        log.exception("synthesis failed for meeting %s: %s", meeting_id, e)
+        with SessionLocal() as s:
+            m = s.get(Meeting, meeting_id)
+            if m is not None:
+                m.status = "failed"
+                m.state_changed_at = datetime.now(tz=timezone.utc)
+                s.commit()
+            s.add(DeadLetterJob(
+                job_kind="synthesize",
+                meeting_id=meeting_id,
+                payload_json={"meeting_id": str(meeting_id)},
+                error=str(e)[:1000],
+                attempt_count=1,
+                status="open",
+            ))
+            s.commit()
+        await publish_live(meeting_id, "state", {"status": "failed"})
+        return
+
+    now = datetime.now(tz=timezone.utc)
+    final_status = "done" if output is not None else "failed"
+    with SessionLocal() as s:
+        m = s.get(Meeting, meeting_id)
+        if m is None:
+            return
+        m.status = final_status
+        m.state_changed_at = now
+        s.commit()
+    await publish_live(meeting_id, "state", {"status": final_status, "state_changed_at": now.isoformat()})
+    await publish_live(meeting_id, "summary_ready", {})
+    log.info("synthesis done for meeting %s outcome=%s", meeting_id, outcome)
+
+
+@router.post("/meetings/{meeting_id}/crm-push", status_code=201)
+async def crm_push(meeting_id: UUID) -> dict:
+    """Mock CRM push — writes an internal meeting event so it's visible in the
+    event log (and, later, Mission Control). Pretends to POST to a CRM."""
+    now = datetime.now(tz=timezone.utc)
+    with SessionLocal() as s:
+        m = s.get(Meeting, meeting_id)
+        if m is None:
+            raise HTTPException(404, "meeting not found")
+        crm_note = s.execute(
+            select(Summary).where(
+                Summary.meeting_id == meeting_id,
+                Summary.summary_type == "crm_note",
+            )
+        ).scalars().first()
+        note_text = crm_note.content_markdown if crm_note else ""
+        dedupe_key = f"crm-push:{meeting_id}:{now.isoformat()}"
+        s.add(MeetingEvent(
+            meeting_id=meeting_id,
+            source="internal",
+            event_type="internal.crm_pushed",
+            event_timestamp=now,
+            received_at=now,
+            payload_json={
+                "meeting_id": str(meeting_id),
+                "note": note_text,
+                "destination": "mock-crm",
+            },
+            dedupe_key=dedupe_key,
+            signature_valid=True,
+        ))
+        s.commit()
+    await publish_live(meeting_id, "crm_pushed", {"at": now.isoformat()})
+    return {"meeting_id": str(meeting_id), "pushed_at": now.isoformat()}
 
 
 @router.get("/meetings/{meeting_id}", response_model=MeetingDetail)
