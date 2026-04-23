@@ -10,7 +10,7 @@ from typing import Awaitable, Callable, Optional
 from sqlalchemy.orm import Session
 
 from db import SessionLocal
-from handlers import DEFAULT_HANDLERS, handle_unknown
+from handlers import DEFAULT_HANDLERS, build_handlers, handle_unknown
 from models import DeadLetterJob, MeetingEvent
 from streams import (
     GROUP_NAME,
@@ -40,6 +40,7 @@ class Worker:
         handlers: Optional[dict[str, Handler]] = None,
         max_attempts: int = 3,
         read_count: int = 64,
+        batcher=None,
     ) -> None:
         self.consumer_id = consumer_id
         self.handlers = handlers if handlers is not None else DEFAULT_HANDLERS
@@ -47,11 +48,25 @@ class Worker:
         self.read_count = read_count
         self.stop_event = asyncio.Event()
         self.r = None  # type: ignore[assignment]
+        self.batcher = batcher
+        self._batcher_timer: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         self.r = make_client()
+        if self.batcher is not None:
+            self._batcher_timer = asyncio.create_task(self.batcher.run_timer(0.5))
 
     async def close(self) -> None:
+        if self.batcher is not None:
+            self.batcher.stop()
+            if self._batcher_timer is not None:
+                self._batcher_timer.cancel()
+                try:
+                    await self._batcher_timer
+                except asyncio.CancelledError:
+                    pass
+                self._batcher_timer = None
+            await self.batcher.flush_all()
         if self.r is not None:
             await self.r.aclose()
             self.r = None
@@ -167,7 +182,20 @@ class Worker:
 
 async def _main() -> None:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    worker = Worker(consumer_id=f"worker-{os.getpid()}")
+
+    from intelligence.batcher import Batcher
+    from intelligence.classifier import AnthropicClient, SignalClassifier
+
+    client = AnthropicClient()
+    classifier = SignalClassifier(client=client)
+    batcher = Batcher(session_factory=SessionLocal, classifier=classifier)
+    handlers = build_handlers(batcher=batcher)
+
+    worker = Worker(
+        consumer_id=f"worker-{os.getpid()}",
+        handlers=handlers,
+        batcher=batcher,
+    )
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:

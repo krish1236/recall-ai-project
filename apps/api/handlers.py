@@ -143,24 +143,23 @@ async def _resolve_meeting_id(event: MeetingEvent, session: Session) -> Optional
     return mid
 
 
-async def handle_transcript_data(event: MeetingEvent, session: Session) -> None:
+async def handle_transcript_data(event: MeetingEvent, session: Session) -> Optional[TranscriptUtterance]:
     """Project a finalized transcript event into transcript_utterances.
 
-    Recall's real payload nests utterance content at `payload.data.data` and uses
-    `start_timestamp.relative` / `end_timestamp.relative` (seconds from recording
-    start). We also accept the flatter shape some fixtures/tests use.
+    Returns the persisted utterance so a caller (e.g. a batcher wrapper) can
+    enqueue it for downstream classification.
     """
     meeting_id = await _resolve_meeting_id(event, session)
     if meeting_id is None:
         log.debug("transcript.data with no resolvable meeting; dropping")
-        return
+        return None
 
     outer = event.payload_json.get("data") or {}
     inner = outer.get("data") if isinstance(outer.get("data"), dict) else None
     body = inner if inner is not None else outer
     words = body.get("words") or []
     if not words:
-        return
+        return None
 
     speaker = None
     participant = body.get("participant")
@@ -172,14 +171,14 @@ async def handle_transcript_data(event: MeetingEvent, session: Session) -> None:
     text_parts = [w.get("text", "") for w in words if w.get("text")]
     text = " ".join(text_parts).strip()
     if not text:
-        return
+        return None
 
     start_s = _word_time(words[0], "start")
     end_s = _word_time(words[-1], "end") or start_s
     start_ms = int(start_s * 1000)
     end_ms = int(end_s * 1000)
 
-    session.add(TranscriptUtterance(
+    utt = TranscriptUtterance(
         meeting_id=meeting_id,
         source_event_id=event.id,
         speaker_label=str(speaker) if speaker is not None else None,
@@ -187,7 +186,10 @@ async def handle_transcript_data(event: MeetingEvent, session: Session) -> None:
         is_partial=False,
         start_ms=start_ms,
         end_ms=end_ms,
-    ))
+    )
+    session.add(utt)
+    session.flush()
+    return utt
 
 
 async def handle_transcript_partial(event: MeetingEvent, session: Session) -> None:
@@ -205,3 +207,25 @@ DEFAULT_HANDLERS = {
     "bot.status_change": handle_status_change,
     "__default__": handle_unknown,
 }
+
+
+def build_handlers(batcher: Optional[Any] = None) -> dict:
+    """Return a handlers dict wired to a batcher so finalized transcripts are
+    enqueued for LLM classification. If no batcher is provided, returns the
+    plain projector-only handlers.
+    """
+    if batcher is None:
+        return DEFAULT_HANDLERS
+
+    async def transcript_data_and_enqueue(event: MeetingEvent, session: Session) -> None:
+        utt = await handle_transcript_data(event, session)
+        if utt is None or utt.meeting_id is None:
+            return
+        # Commit so the batcher's flush task (separate session) can read the row.
+        session.commit()
+        await batcher.enqueue(utt.meeting_id, utt.id, utt.text)
+
+    return {
+        **DEFAULT_HANDLERS,
+        "transcript.data": transcript_data_and_enqueue,
+    }
